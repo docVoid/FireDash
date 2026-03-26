@@ -1,10 +1,12 @@
 # FireDash
+<img width="490" height="186" alt="image" src="https://github.com/user-attachments/assets/218c380e-4cba-4e19-93f7-658473d3af11" />
 
-A retro-styled 2D endless runner web game — inspired by the Chrome Dino, but you're a **fireman** dodging hilariously random obstacles.
+
+A retro-styled 2D endless runner web game — you're a **fireman** dodging hilariously random obstacles.
 
 ## Play
 
-Open `index.html` in any modern browser. No build step, no dependencies — just one file.
+[Visit firedash.pngrtz.com](https://firedash.pngrtz.com)
 
 ## Controls
 
