@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>FireDash</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        touch-action: none;
+        background: #1a1a2e;
+        font-family: "Courier New", monospace;
+      }
+
+      #gameContainer {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      canvas {
+        display: block;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="gameContainer">
+      <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <script>
+      (function () {
+        "use strict";
+
+        // ── Canvas Setup ──
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        let W, H, GROUND_Y, SCALE;
+
+        function resize() {
+          const dpr = window.devicePixelRatio || 1;
+          W = window.innerWidth;
+          H = window.innerHeight;
+          canvas.width = W * dpr;
+          canvas.height = H * dpr;
+          canvas.style.width = W + "px";
+          canvas.style.height = H + "px";
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          SCALE = Math.min(W / 800, H / 400);
+          GROUND_Y = H * 0.78;
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        // ── Audio (Web Audio API – generated sounds) ──
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+
+        function ensureAudio() {
+          if (!audioCtx) audioCtx = new AudioCtx();
+          if (audioCtx.state === "suspended") audioCtx.resume();
+        }
+
+        function playJumpSound() {
+          ensureAudio();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.type = "square";
+          osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(
+            600,
+            audioCtx.currentTime + 0.15,
+          );
+          gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(
+            0.001,
+            audioCtx.currentTime + 0.25,
+          );
+          osc.start(audioCtx.currentTime);
+          osc.stop(audioCtx.currentTime + 0.25);
+        }
+
+        function playGameOverSound() {
+          ensureAudio();
+          const t = audioCtx.currentTime;
+          [400, 300, 200].forEach((freq, i) => {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.type = "square";
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0.12, t + i * 0.18);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.18 + 0.3);
+            osc.start(t + i * 0.18);
+            osc.stop(t + i * 0.18 + 0.35);
+          });
+        }
+
+        // ── Game State ──
+        const STATE = { READY: 0, PLAYING: 1, OVER: 2 };
+        let state = STATE.READY;
+        let score = 0;
+        let highscore = parseInt(sessionStorage.getItem("fd_hi")) || 0;
+        let newBest = false;
+        let gameSpeed = 4;
+        let baseSpeed = 4;
+        let frameCount = 0;
+        let lastTime = 0;
+        let dt = 0;
+
+        // ── Player ──
+        const player = {
+          x: 0,
+          y: 0,
+          w: 30,
+          h: 48,
+          vy: 0,
+          grounded: true,
+          jumpPower: -11,
+          gravity: 0.45,
+          animFrame: 0,
+          animTimer: 0,
+        };
+
+        function resetPlayer() {
+          player.x = W * 0.12;
+          player.y = GROUND_Y - player.h * SCALE;
+          player.vy = 0;
+          player.grounded = true;
+          player.animFrame = 0;
+        }
+
+        // ── Obstacles ──
+        // 5 humorous obstacle types
+        const OBSTACLE_TYPES = [
+          {
+            name: "Hydrant",
+            color: "#e63946",
+            accent: "#a8001e",
+            w: 24,
+            h: 36,
+            draw: drawHydrant,
+          },
+          {
+            name: "Cat",
+            color: "#ff9f1c",
+            accent: "#ffbf69",
+            w: 30,
+            h: 28,
+            draw: drawCat,
+          },
+          {
+            name: "Donut",
+            color: "#ff6b9d",
+            accent: "#f7e1d7",
+            w: 30,
+            h: 30,
+            draw: drawDonut,
+          },
+          {
+            name: "Banana",
+            color: "#ffe66d",
+            accent: "#f7c948",
+            w: 18,
+            h: 34,
+            draw: drawBanana,
+          },
+          {
+            name: "RubberDuck",
+            color: "#ffd166",
+            accent: "#ef8d22",
+            w: 28,
+            h: 26,
+            draw: drawDuck,
+          },
+        ];
+
+        let obstacles = [];
+        let spawnTimer = 0;
+        let minSpawnInterval = 80;
+
+        function spawnObstacle() {
+          const type =
+            OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+          const sw = type.w * SCALE;
+          const sh = type.h * SCALE;
+          obstacles.push({
+            x: W + sw,
+            y: GROUND_Y - sh,
+            w: sw,
+            h: sh,
+            type: type,
+            passed: false,
+          });
+        }
+
+        // ── Obstacle Drawing Functions ──
+        function drawHydrant(x, y, w, h) {
+          // Body
+          ctx.fillStyle = "#e63946";
+          const bx = x + w * 0.2,
+            bw = w * 0.6;
+          ctx.fillRect(bx, y + h * 0.25, bw, h * 0.75);
+          // Cap
+          ctx.fillStyle = "#a8001e";
+          ctx.fillRect(x + w * 0.1, y, w * 0.8, h * 0.3);
+          // Top nub
+          ctx.fillRect(x + w * 0.35, y - h * 0.1, w * 0.3, h * 0.15);
+          // Side nubs
+          ctx.fillStyle = "#c1121f";
+          ctx.fillRect(x, y + h * 0.35, w * 0.25, h * 0.15);
+          ctx.fillRect(x + w * 0.75, y + h * 0.35, w * 0.25, h * 0.15);
+          // Bolts
+          ctx.fillStyle = "#333";
+          ctx.fillRect(bx + bw * 0.25, y + h * 0.55, 3 * SCALE, 3 * SCALE);
+          ctx.fillRect(bx + bw * 0.6, y + h * 0.55, 3 * SCALE, 3 * SCALE);
+        }
+
+        function drawCat(x, y, w, h) {
+          // Body
+          ctx.fillStyle = "#ff9f1c";
+          ctx.fillRect(x + w * 0.1, y + h * 0.35, w * 0.8, h * 0.55);
+          // Head
+          ctx.fillRect(x + w * 0.2, y + h * 0.1, w * 0.55, h * 0.35);
+          // Ears (triangles as small rects)
+          ctx.fillRect(x + w * 0.2, y, w * 0.15, h * 0.18);
+          ctx.fillRect(x + w * 0.6, y, w * 0.15, h * 0.18);
+          // Eyes
+          ctx.fillStyle = "#333";
+          ctx.fillRect(x + w * 0.3, y + h * 0.22, 3 * SCALE, 3 * SCALE);
+          ctx.fillRect(x + w * 0.55, y + h * 0.22, 3 * SCALE, 3 * SCALE);
+          // Tail
+          ctx.fillStyle = "#e68a00";
+          ctx.fillRect(x + w * 0.8, y + h * 0.35, w * 0.2, h * 0.08);
+          ctx.fillRect(x + w * 0.9, y + h * 0.2, w * 0.1, h * 0.2);
+          // Legs
+          ctx.fillStyle = "#ff9f1c";
+          ctx.fillRect(x + w * 0.15, y + h * 0.82, w * 0.15, h * 0.18);
+          ctx.fillRect(x + w * 0.65, y + h * 0.82, w * 0.15, h * 0.18);
+        }
+
+        function drawDonut(x, y, w, h) {
+          const cx = x + w / 2,
+            cy = y + h / 2;
+          const r = Math.min(w, h) * 0.45;
+          // Outer donut
+          ctx.fillStyle = "#ff6b9d";
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.fill();
+          // Frosting
+          ctx.fillStyle = "#f7e1d7";
+          ctx.beginPath();
+          ctx.arc(cx, cy - r * 0.1, r * 0.85, Math.PI, Math.PI * 2);
+          ctx.fill();
+          // Hole
+          ctx.fillStyle = "#87ceeb";
+          ctx.beginPath();
+          ctx.arc(cx, cy, r * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+          // Sprinkles
+          const sprinkleColors = ["#e63946", "#06d6a0", "#118ab2", "#ffd166"];
+          for (let i = 0; i < 6; i++) {
+            ctx.fillStyle = sprinkleColors[i % sprinkleColors.length];
+            const angle = (i / 6) * Math.PI * 2;
+            const sr = r * 0.65;
+            const sx = cx + Math.cos(angle) * sr;
+            const sy = cy + Math.sin(angle) * sr - r * 0.05;
+            ctx.fillRect(
+              sx - 1.5 * SCALE,
+              sy - 0.5 * SCALE,
+              3 * SCALE,
+              1.5 * SCALE,
+            );
+          }
+        }
+
+        function drawBanana(x, y, w, h) {
+          // Banana body (curved via rects)
+          ctx.fillStyle = "#ffe66d";
+          ctx.fillRect(x + w * 0.3, y + h * 0.1, w * 0.4, h * 0.75);
+          ctx.fillRect(x + w * 0.15, y + h * 0.3, w * 0.3, h * 0.4);
+          ctx.fillRect(x + w * 0.6, y + h * 0.2, w * 0.2, h * 0.3);
+          // Tip
+          ctx.fillStyle = "#a67c00";
+          ctx.fillRect(x + w * 0.35, y, w * 0.3, h * 0.15);
+          // Brown bottom
+          ctx.fillStyle = "#8b6914";
+          ctx.fillRect(x + w * 0.35, y + h * 0.85, w * 0.3, h * 0.15);
+          // Spots
+          ctx.fillStyle = "#c9a227";
+          ctx.fillRect(x + w * 0.4, y + h * 0.4, 2 * SCALE, 2 * SCALE);
+          ctx.fillRect(x + w * 0.5, y + h * 0.55, 2 * SCALE, 2 * SCALE);
+        }
+
+        function drawDuck(x, y, w, h) {
+          // Body
+          ctx.fillStyle = "#ffd166";
+          ctx.beginPath();
+          ctx.ellipse(
+            x + w * 0.5,
+            y + h * 0.6,
+            w * 0.45,
+            h * 0.38,
+            0,
+            0,
+            Math.PI * 2,
+          );
+          ctx.fill();
+          // Head
+          ctx.beginPath();
+          ctx.arc(x + w * 0.7, y + h * 0.25, w * 0.22, 0, Math.PI * 2);
+          ctx.fill();
+          // Beak
+          ctx.fillStyle = "#ef8d22";
+          ctx.fillRect(x + w * 0.82, y + h * 0.2, w * 0.2, h * 0.12);
+          // Eye
+          ctx.fillStyle = "#333";
+          ctx.fillRect(x + w * 0.72, y + h * 0.18, 2.5 * SCALE, 2.5 * SCALE);
+          // Wing
+          ctx.fillStyle = "#f0c040";
+          ctx.beginPath();
+          ctx.ellipse(
+            x + w * 0.4,
+            y + h * 0.55,
+            w * 0.18,
+            h * 0.2,
+            -0.3,
+            0,
+            Math.PI * 2,
+          );
+          ctx.fill();
+        }
+
+        // ── Clouds ──
+        let clouds = [];
+        function initClouds() {
+          clouds = [];
+          for (let i = 0; i < 6; i++) {
+            clouds.push({
+              x: Math.random() * W * 1.5,
+              y: H * 0.08 + Math.random() * H * 0.28,
+              w: (40 + Math.random() * 60) * SCALE,
+              h: (18 + Math.random() * 16) * SCALE,
+              speed: 0.3 + Math.random() * 0.5,
+            });
+          }
+        }
+
+        // ── Dust Particles ──
+        let dustParticles = [];
+        function spawnDust() {
+          if (!player.grounded) return;
+          dustParticles.push({
+            x: player.x + 2 * SCALE,
+            y: GROUND_Y - 2 * SCALE,
+            vx: -(1 + Math.random() * 2),
+            vy: -(Math.random() * 1.5),
+            life: 15 + Math.random() * 10,
+            size: (2 + Math.random() * 3) * SCALE,
+          });
+        }
+
+        // ── Ground Detail ──
+        let groundDetails = [];
+        function initGroundDetails() {
+          groundDetails = [];
+          for (let i = 0; i < 30; i++) {
+            groundDetails.push({
+              x: Math.random() * W * 1.3,
+              type: Math.random() > 0.5 ? "pebble" : "crack",
+            });
+          }
+        }
+
+        // ── Drawing Helpers ──
+        function drawPixelText(text, x, y, size, color, align) {
+          ctx.fillStyle = color || "#fff";
+          ctx.font = `bold ${size}px 'Courier New', monospace`;
+          ctx.textAlign = align || "left";
+          ctx.textBaseline = "top";
+          // Shadow
+          ctx.fillStyle = "rgba(0,0,0,0.35)";
+          ctx.fillText(text, x + 2, y + 2);
+          ctx.fillStyle = color || "#fff";
+          ctx.fillText(text, x, y);
+        }
+
+        function drawBackground() {
+          // Sky gradient
+          const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+          grad.addColorStop(0, "#87ceeb");
+          grad.addColorStop(0.6, "#b8e2f8");
+          grad.addColorStop(1, "#e0f0ff");
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, W, GROUND_Y);
+
+          // Sun
+          ctx.fillStyle = "#fff3b0";
+          ctx.beginPath();
+          ctx.arc(W * 0.85, H * 0.12, 25 * SCALE, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#ffe066";
+          ctx.beginPath();
+          ctx.arc(W * 0.85, H * 0.12, 18 * SCALE, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Clouds
+          clouds.forEach((c) => {
+            ctx.fillStyle = "rgba(255,255,255,0.85)";
+            ctx.beginPath();
+            ctx.ellipse(c.x, c.y, c.w * 0.5, c.h * 0.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(
+              c.x - c.w * 0.3,
+              c.y + c.h * 0.1,
+              c.w * 0.35,
+              c.h * 0.38,
+              0,
+              0,
+              Math.PI * 2,
+            );
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(
+              c.x + c.w * 0.3,
+              c.y + c.h * 0.08,
+              c.w * 0.32,
+              c.h * 0.35,
+              0,
+              0,
+              Math.PI * 2,
+            );
+            ctx.fill();
+          });
+
+          // Distant buildings silhouette
+          ctx.fillStyle = "rgba(100,130,160,0.15)";
+          for (let i = 0; i < 12; i++) {
+            const bx = (i * W) / 10 - W * 0.05;
+            const bh =
+              (30 + Math.sin(i * 2.3) * 20 + Math.cos(i * 1.7) * 15) * SCALE;
+            const bw = (30 + Math.sin(i * 3.1) * 15) * SCALE;
+            ctx.fillRect(bx, GROUND_Y - bh, bw, bh);
+          }
+
+          // Ground
+          ctx.fillStyle = "#6b8f71";
+          ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+          // Ground top line
+          ctx.fillStyle = "#5a7a60";
+          ctx.fillRect(0, GROUND_Y, W, 4 * SCALE);
+
+          // Dirt layer
+          ctx.fillStyle = "#8b6914";
+          ctx.fillRect(0, GROUND_Y + 4 * SCALE, W, H - GROUND_Y - 4 * SCALE);
+
+          // Ground details
+          groundDetails.forEach((d) => {
+            if (d.type === "pebble") {
+              ctx.fillStyle = "rgba(80,60,30,0.3)";
+              ctx.fillRect(d.x, GROUND_Y + 6 * SCALE, 4 * SCALE, 3 * SCALE);
+            } else {
+              ctx.fillStyle = "rgba(60,40,10,0.2)";
+              ctx.fillRect(d.x, GROUND_Y + 2 * SCALE, 1.5 * SCALE, 8 * SCALE);
+            }
+          });
+        }
+
+        // ── Draw Player (Fireman) ──
+        function drawPlayer() {
+          const px = player.x;
+          const py = player.y;
+          const pw = player.w * SCALE;
+          const ph = player.h * SCALE;
+
+          const legOffset = player.grounded
+            ? Math.sin(player.animFrame * 0.4) * 3 * SCALE
+            : 0;
+
+          // Boots
+          ctx.fillStyle = "#222";
+          ctx.fillRect(
+            px + pw * 0.1,
+            py + ph * 0.85 + legOffset,
+            pw * 0.3,
+            ph * 0.15,
+          );
+          ctx.fillRect(
+            px + pw * 0.55,
+            py + ph * 0.85 - legOffset,
+            pw * 0.3,
+            ph * 0.15,
+          );
+
+          // Pants
+          ctx.fillStyle = "#333";
+          ctx.fillRect(
+            px + pw * 0.15,
+            py + ph * 0.58 + legOffset,
+            pw * 0.25,
+            ph * 0.3,
+          );
+          ctx.fillRect(
+            px + pw * 0.55,
+            py + ph * 0.58 - legOffset,
+            pw * 0.25,
+            ph * 0.3,
+          );
+
+          // Body / jacket
+          ctx.fillStyle = "#d62828";
+          ctx.fillRect(px + pw * 0.1, py + ph * 0.28, pw * 0.75, ph * 0.35);
+
+          // Jacket stripes (reflective)
+          ctx.fillStyle = "#ffd166";
+          ctx.fillRect(px + pw * 0.1, py + ph * 0.48, pw * 0.75, ph * 0.04);
+          ctx.fillRect(px + pw * 0.1, py + ph * 0.38, pw * 0.75, ph * 0.03);
+
+          // Arms
+          const armSwing = player.grounded
+            ? Math.sin(player.animFrame * 0.4) * 4 * SCALE
+            : -3 * SCALE;
+          ctx.fillStyle = "#d62828";
+          ctx.fillRect(
+            px - pw * 0.05,
+            py + ph * 0.3 - armSwing,
+            pw * 0.18,
+            ph * 0.22,
+          );
+          ctx.fillRect(
+            px + pw * 0.82,
+            py + ph * 0.3 + armSwing,
+            pw * 0.18,
+            ph * 0.22,
+          );
+          // Gloves
+          ctx.fillStyle = "#333";
+          ctx.fillRect(
+            px - pw * 0.05,
+            py + ph * 0.48 - armSwing,
+            pw * 0.18,
+            ph * 0.06,
+          );
+          ctx.fillRect(
+            px + pw * 0.82,
+            py + ph * 0.48 + armSwing,
+            pw * 0.18,
+            ph * 0.06,
+          );
+
+          // Head (skin)
+          ctx.fillStyle = "#f4a261";
+          ctx.fillRect(px + pw * 0.2, py + ph * 0.1, pw * 0.55, ph * 0.22);
+
+          // Helmet
+          ctx.fillStyle = "#d62828";
+          ctx.fillRect(px + pw * 0.12, py, pw * 0.72, ph * 0.16);
+          // Helmet brim
+          ctx.fillStyle = "#a4161a";
+          ctx.fillRect(px + pw * 0.08, py + ph * 0.12, pw * 0.8, ph * 0.05);
+          // Helmet badge
+          ctx.fillStyle = "#ffd166";
+          ctx.fillRect(px + pw * 0.38, py + ph * 0.03, pw * 0.2, ph * 0.08);
+
+          // Eyes
+          ctx.fillStyle = "#222";
+          ctx.fillRect(px + pw * 0.3, py + ph * 0.17, 3 * SCALE, 3 * SCALE);
+          ctx.fillRect(px + pw * 0.58, py + ph * 0.17, 3 * SCALE, 3 * SCALE);
+
+          // Mouth (smile)
+          ctx.fillStyle = "#222";
+          ctx.fillRect(px + pw * 0.35, py + ph * 0.26, pw * 0.25, 1.5 * SCALE);
+        }
+
+        // ── Dust Drawing ──
+        function drawDust() {
+          dustParticles.forEach((p) => {
+            const alpha = p.life / 25;
+            ctx.fillStyle = `rgba(180,160,130,${alpha * 0.6})`;
+            ctx.fillRect(p.x, p.y, p.size, p.size);
+          });
+        }
+
+        // ── UI Drawing ──
+        function drawScore() {
+          const fontSize = Math.max(18, 22 * SCALE);
+          drawPixelText(
+            "SCORE: " + score,
+            W - 15,
+            15,
+            fontSize,
+            "#333",
+            "right",
+          );
+        }
+
+        function drawReadyScreen() {
+          // Overlay
+          ctx.fillStyle = "rgba(0,0,0,0.25)";
+          ctx.fillRect(0, 0, W, H);
+
+          const titleSize = Math.max(32, 52 * SCALE);
+          const subSize = Math.max(14, 18 * SCALE);
+
+          // Title with fire colors
+          ctx.font = `bold ${titleSize}px 'Courier New', monospace`;
+          ctx.textAlign = "center";
+
+          // Title shadow
+          ctx.fillStyle = "rgba(0,0,0,0.4)";
+          ctx.fillText("FIREDASH", W / 2 + 3, H * 0.3 + 3);
+
+          // Title gradient
+          const tGrad = ctx.createLinearGradient(
+            0,
+            H * 0.28,
+            0,
+            H * 0.28 + titleSize,
+          );
+          tGrad.addColorStop(0, "#ff6b35");
+          tGrad.addColorStop(0.5, "#d62828");
+          tGrad.addColorStop(1, "#ffd166");
+          ctx.fillStyle = tGrad;
+          ctx.fillText("FIREDASH", W / 2, H * 0.3);
+
+          // Subtitle with fire emoji
+          drawPixelText(
+            "🔥 Endless Runner 🔥",
+            W / 2,
+            H * 0.3 + titleSize + 5,
+            subSize,
+            "#fff",
+            "center",
+          );
+
+          // Instruction
+          const blinkAlpha = 0.5 + Math.sin(Date.now() * 0.005) * 0.5;
+          ctx.globalAlpha = blinkAlpha;
+          drawPixelText(
+            "TAP / CLICK / SPACE to Start",
+            W / 2,
+            H * 0.55,
+            subSize,
+            "#fff",
+            "center",
+          );
+          ctx.globalAlpha = 1;
+
+          // Highscore
+          if (highscore > 0) {
+            drawPixelText(
+              "Best: " + highscore,
+              W / 2,
+              H * 0.65,
+              subSize,
+              "#ffd166",
+              "center",
+            );
+          }
+
+          // Obstacle legend
+          const legendY = H * 0.78;
+          const legendSize = Math.max(10, 13 * SCALE);
+          drawPixelText(
+            "Avoid: Hydrants • Cats • Donuts • Bananas • Rubber Ducks",
+            W / 2,
+            legendY,
+            legendSize,
+            "rgba(255,255,255,0.6)",
+            "center",
+          );
+        }
+
+        function drawGameOverScreen() {
+          // Dark overlay
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.fillRect(0, 0, W, H);
+
+          // Panel
+          const panelW = Math.min(W * 0.85, 400);
+          const panelH = Math.min(H * 0.55, 300);
+          const panelX = (W - panelW) / 2;
+          const panelY = (H - panelH) / 2;
+
+          // Panel bg
+          ctx.fillStyle = "#1a1a2e";
+          ctx.fillRect(panelX, panelY, panelW, panelH);
+          // Panel border
+          ctx.strokeStyle = "#e63946";
+          ctx.lineWidth = 3 * SCALE;
+          ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+          const titleSize = Math.max(24, 36 * SCALE);
+          const textSize = Math.max(14, 20 * SCALE);
+          const smallSize = Math.max(12, 16 * SCALE);
+
+          // GAME OVER
+          drawPixelText(
+            "GAME OVER",
+            W / 2,
+            panelY + panelH * 0.08,
+            titleSize,
+            "#e63946",
+            "center",
+          );
+
+          // Score
+          drawPixelText(
+            "Score: " + score,
+            W / 2,
+            panelY + panelH * 0.3,
+            textSize,
+            "#fff",
+            "center",
+          );
+
+          // Highscore
+          drawPixelText(
+            "Best: " + highscore,
+            W / 2,
+            panelY + panelH * 0.45,
+            textSize,
+            "#ffd166",
+            "center",
+          );
+
+          // New best message
+          if (newBest) {
+            const bestAlpha = 0.6 + Math.sin(Date.now() * 0.008) * 0.4;
+            ctx.globalAlpha = bestAlpha;
+            drawPixelText(
+              "★ New Personal Best! ★",
+              W / 2,
+              panelY + panelH * 0.6,
+              smallSize,
+              "#06d6a0",
+              "center",
+            );
+            ctx.globalAlpha = 1;
+          }
+
+          // Restart
+          const blinkAlpha = 0.5 + Math.sin(Date.now() * 0.005) * 0.5;
+          ctx.globalAlpha = blinkAlpha;
+          drawPixelText(
+            "Tap / Click / Space to Restart",
+            W / 2,
+            panelY + panelH * 0.8,
+            smallSize,
+            "#fff",
+            "center",
+          );
+          ctx.globalAlpha = 1;
+        }
+
+        // ── Collision Detection ──
+        function checkCollision(a, b) {
+          const shrink = 0.2; // Forgiving hitbox
+          const ax = a.x + a.w * shrink;
+          const ay = a.y + a.h * shrink;
+          const aw = a.w * (1 - shrink * 2);
+          const ah = a.h * (1 - shrink * 2);
+          return (
+            ax < b.x + b.w && ax + aw > b.x && ay < b.y + b.h && ay + ah > b.y
+          );
+        }
+
+        // ── Game Reset ──
+        function resetGame() {
+          score = 0;
+          gameSpeed = baseSpeed;
+          obstacles = [];
+          spawnTimer = 0;
+          frameCount = 0;
+          dustParticles = [];
+          newBest = false;
+          resetPlayer();
+          initClouds();
+          initGroundDetails();
+        }
+
+        // ── Input ──
+        let inputCooldown = 0;
+
+        function handleInput() {
+          if (inputCooldown > 0) return;
+          inputCooldown = 10;
+
+          if (state === STATE.READY) {
+            state = STATE.PLAYING;
+            resetGame();
+            return;
+          }
+
+          if (state === STATE.PLAYING) {
+            if (player.grounded) {
+              player.vy = player.jumpPower * SCALE;
+              player.grounded = false;
+              playJumpSound();
+            }
+            return;
+          }
+
+          if (state === STATE.OVER) {
+            state = STATE.PLAYING;
+            resetGame();
+            return;
+          }
+        }
+
+        // Keyboard
+        document.addEventListener("keydown", (e) => {
+          if (e.code === "Space" || e.code === "ArrowUp") {
+            e.preventDefault();
+            handleInput();
+          }
+        });
+
+        // Mouse
+        canvas.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          handleInput();
+        });
+
+        // Touch
+        canvas.addEventListener(
+          "touchstart",
+          (e) => {
+            e.preventDefault();
+            handleInput();
+          },
+          { passive: false },
+        );
+
+        // Prevent default touch behaviors
+        document.addEventListener("touchmove", (e) => e.preventDefault(), {
+          passive: false,
+        });
+
+        // ── Update ──
+        function update() {
+          if (inputCooldown > 0) inputCooldown--;
+          frameCount++;
+
+          if (state !== STATE.PLAYING) return;
+
+          // Difficulty ramp
+          const speedLevel = Math.floor(score / 500);
+          gameSpeed = baseSpeed + speedLevel * 0.6;
+
+          // Player physics
+          if (!player.grounded) {
+            player.vy += player.gravity * SCALE;
+            player.y += player.vy;
+            if (player.y >= GROUND_Y - player.h * SCALE) {
+              player.y = GROUND_Y - player.h * SCALE;
+              player.vy = 0;
+              player.grounded = true;
+            }
+          }
+
+          // Animation
+          player.animTimer++;
+          if (player.animTimer > 4) {
+            player.animTimer = 0;
+            player.animFrame++;
+          }
+
+          // Dust
+          if (frameCount % 3 === 0 && player.grounded) spawnDust();
+          dustParticles.forEach((p) => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+          });
+          dustParticles = dustParticles.filter((p) => p.life > 0);
+
+          // Clouds
+          clouds.forEach((c) => {
+            c.x -= c.speed * (gameSpeed / baseSpeed);
+            if (c.x + c.w < -50) {
+              c.x = W + 50 + Math.random() * 100;
+              c.y = H * 0.08 + Math.random() * H * 0.28;
+            }
+          });
+
+          // Ground details
+          groundDetails.forEach((d) => {
+            d.x -= gameSpeed * SCALE;
+            if (d.x < -20) d.x = W + Math.random() * 50;
+          });
+
+          // Obstacles
+          spawnTimer++;
+          const spawnInterval = Math.max(minSpawnInterval - speedLevel * 5, 40);
+          if (spawnTimer >= spawnInterval + Math.random() * 40) {
+            spawnTimer = 0;
+            spawnObstacle();
+          }
+
+          obstacles.forEach((o) => {
+            o.x -= gameSpeed * SCALE;
+          });
+
+          // Score (for obstacles passed)
+          obstacles.forEach((o) => {
+            if (!o.passed && o.x + o.w < player.x) {
+              o.passed = true;
+              score += 10;
+            }
+          });
+
+          // Also add continuous distance score
+          if (frameCount % 6 === 0) score++;
+
+          // Remove off-screen obstacles
+          obstacles = obstacles.filter((o) => o.x + o.w > -50);
+
+          // Collision
+          const playerBox = {
+            x: player.x,
+            y: player.y,
+            w: player.w * SCALE,
+            h: player.h * SCALE,
+          };
+
+          for (const o of obstacles) {
+            if (checkCollision(playerBox, o)) {
+              gameOver();
+              break;
+            }
+          }
+        }
+
+        function gameOver() {
+          state = STATE.OVER;
+          playGameOverSound();
+          newBest = false;
+          if (score > highscore) {
+            highscore = score;
+            sessionStorage.setItem("fd_hi", highscore);
+            newBest = true;
+          }
+        }
+
+        // ── Render ──
+        function render() {
+          ctx.clearRect(0, 0, W, H);
+
+          drawBackground();
+
+          if (state === STATE.PLAYING || state === STATE.OVER) {
+            // Draw obstacles
+            obstacles.forEach((o) => {
+              o.type.draw(o.x, o.y, o.w, o.h);
+            });
+
+            // Draw dust
+            drawDust();
+
+            // Draw player
+            drawPlayer();
+
+            // Draw score
+            drawScore();
+          }
+
+          if (state === STATE.READY) {
+            resetPlayer();
+            drawPlayer();
+            drawReadyScreen();
+          }
+
+          if (state === STATE.OVER) {
+            drawGameOverScreen();
+          }
+        }
+
+        // ── Game Loop ──
+        function gameLoop(timestamp) {
+          if (lastTime === 0) lastTime = timestamp;
+          dt = timestamp - lastTime;
+          lastTime = timestamp;
+
+          // Cap dt to avoid spiral of death
+          if (dt > 50) dt = 50;
+
+          update();
+          render();
+          requestAnimationFrame(gameLoop);
+        }
+
+        // ── Init ──
+        resetGame();
+        requestAnimationFrame(gameLoop);
+      })();
+    </script>
+  </body>
+</html>
