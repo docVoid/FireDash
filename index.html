@@ -170,7 +170,9 @@
         const ctx = canvas.getContext("2d");
         let W, H, GROUND_Y, S;
         const isMobile =
-          "ontouchstart" in window || navigator.maxTouchPoints > 0;
+          window.matchMedia("(pointer: coarse)").matches &&
+          ("ontouchstart" in window || navigator.maxTouchPoints > 0) &&
+          window.innerWidth < 1024;
 
         // Settings
         const settingsBtn = document.getElementById("settingsBtn");
@@ -186,18 +188,27 @@
         settingsBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           settingsPanel.classList.toggle("open");
+          if (settingsPanel.classList.contains("open") && state === ST.PLAY) {
+            paused = true;
+          } else {
+            paused = false;
+          }
         });
         // Close settings when clicking elsewhere
+        function closeSettings() {
+          settingsPanel.classList.remove("open");
+          paused = false;
+        }
         document.addEventListener("click", (e) => {
           if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
-            settingsPanel.classList.remove("open");
+            closeSettings();
           }
         });
         document.addEventListener(
           "touchstart",
           (e) => {
             if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
-              settingsPanel.classList.remove("open");
+              closeSettings();
             }
           },
           { passive: true },
@@ -246,9 +257,8 @@
           if (isMobile) {
             S = Math.max(1.4, Math.min(W / 380, H / 260));
           } else {
-            // Reduced desktop scale — cap at 1.2 so elements aren't oversized on large monitors
-            S = Math.max(0.6, Math.min(W / 900, H / 500));
-            if (S > 1.2) S = 1.2;
+            S = Math.max(1, Math.min(W / 700, H / 400));
+            if (S > 2.2) S = 2.2;
           }
           GROUND_Y = H * 0.78;
         }
@@ -336,6 +346,9 @@
         let isDark = false,
           flashTimer = 0,
           lastModeLvl = 0;
+        let ghostMode = false,
+          ghostMsgTimer = 0;
+        let paused = false;
 
         /* ═══ Player ═══ */
         const P = {
@@ -1164,6 +1177,7 @@
 
         /* ═══ Draw Player ═══ */
         function drawP() {
+          if (ghostMode) ctx.globalAlpha = 0.35;
           const px = P.x,
             pw = P.w * S;
           let ph = pH() * S,
@@ -1191,6 +1205,7 @@
             ctx.fillRect(dx + dw * 0.65, py + ph * 0.08, dw * 0.15, ph * 0.15);
             ctx.fillStyle = "#222";
             ctx.fillRect(dx + dw * 0.72, py + ph * 0.13, 2 * S, 2 * S);
+            ctx.globalAlpha = 1;
             return;
           }
 
@@ -1261,6 +1276,7 @@
           ctx.fillRect(px + pw * 0.3, py + ph * 0.17, 3 * S, 3 * S);
           ctx.fillRect(px + pw * 0.58, py + ph * 0.17, 3 * S, 3 * S);
           ctx.fillRect(px + pw * 0.35, py + ph * 0.26, pw * 0.25, 1.5 * S);
+          ctx.globalAlpha = 1;
         }
 
         function drawDust() {
@@ -1284,6 +1300,22 @@
               isDark ? "#f0a" : "#c06",
               "right",
             );
+          }
+          // Ghost mode HUD
+          if (ghostMsgTimer > 0) {
+            ghostMsgTimer--;
+            const gmFs = Math.max(14, 18 * S);
+            const gmAlpha = Math.min(1, ghostMsgTimer / 30);
+            ctx.globalAlpha = gmAlpha;
+            txt(
+              ghostMode ? "Ghost Mode ON" : "Ghost Mode OFF",
+              W / 2,
+              H * 0.12,
+              gmFs,
+              ghostMode ? "#06d6a0" : "#e63946",
+              "center",
+            );
+            ctx.globalAlpha = 1;
           }
         }
 
@@ -1428,6 +1460,8 @@
           dust = [];
           newBest = false;
           isDark = false;
+          ghostMode = false;
+          ghostMsgTimer = 0;
           flashTimer = 0;
           lastModeLvl = 0;
           resetP();
@@ -1484,6 +1518,10 @@
             e.preventDefault();
             dkDown = true;
             dkStart();
+          }
+          if (e.code === "KeyG" && state === ST.PLAY) {
+            ghostMode = !ghostMode;
+            ghostMsgTimer = 120;
           }
         });
         document.addEventListener("keyup", (e) => {
@@ -1565,7 +1603,7 @@
         function update() {
           if (cd > 0) cd--;
           frameCount++;
-          if (state !== ST.PLAY) return;
+          if (state !== ST.PLAY || paused) return;
 
           const sl = Math.floor(score / 200);
           gameSpeed = baseSpeed + sl * 0.5;
@@ -1649,10 +1687,12 @@
             pw = P.w * S;
           const py = P.ducking ? GROUND_Y - ph : P.y;
           const pb = { x: P.x, y: py, w: pw, h: ph };
-          for (const o of obs) {
-            if (hit(pb, o)) {
-              gameOverFn();
-              break;
+          if (!ghostMode) {
+            for (const o of obs) {
+              if (hit(pb, o)) {
+                gameOverFn();
+                break;
+              }
             }
           }
         }
@@ -1692,6 +1732,21 @@
         function loop() {
           update();
           render();
+          if (paused) {
+            ctx.fillStyle = "rgba(0,0,0,0.45)";
+            ctx.fillRect(0, 0, W, H);
+            const pfs = Math.max(22, 32 * S);
+            txt("PAUSE", W / 2, H * 0.42, pfs, "#fff", "center");
+            const sfs = Math.max(12, 16 * S);
+            txt(
+              "Einstellungen schliessen zum Fortfahren",
+              W / 2,
+              H * 0.42 + pfs + 8,
+              sfs,
+              "#ccc",
+              "center",
+            );
+          }
           requestAnimationFrame(loop);
         }
         reset();
