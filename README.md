@@ -6,7 +6,7 @@ A retro-styled 2D endless runner web game — you're a **fireman** dodging hilar
 
 ## Play
 
-[Visit firedash.pngrtz.com](https://firedash.pngrtz.com)
+Visit [firedash.pngrtz.com](https://firedash.pngrtz.com)
 
 ## Controls
 
